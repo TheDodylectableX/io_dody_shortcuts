@@ -3,8 +3,9 @@
 
 # Features
 - Dedicated Sidebar menu to house all the features the plugin has
-- Remove Vertex Groups, Modifiers, Vertex Colors and Shape Keys for all objects that have them *(Works in bulk)*
-- A function to check how many shape keys an object has *(Currently works per single highlighted object - Open the System Console to check the count)*
+- Remove Vertex Groups, Modifiers, Vertex Colors, Shape Keys and UV Maps for all objects that have them *(Works in bulk)*
+- A function to report to the user how many shape keys a selected object has
+- Context aware; They wouldn't work if the selected object isn't a mesh
 
 # Installation Instructions
 1. Grab the latest release from the Releases page or download the repository's code as a ZIP file.
