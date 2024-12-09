@@ -2,10 +2,24 @@
 ### A simple [Blender 3.X/4.X+](https://blender.org) plugin I've written to quickly do some functions while modding, saves a lot of clicks.
 
 # Features
-- Dedicated Sidebar menu to house all the features the plugin has
-- Remove Vertex Groups, Modifiers, Vertex Colors, Shape Keys and UV Maps for all objects that have them *(Works in bulk)*
-- A function to report to the user how many shape keys a selected object has
-- Context aware; They wouldn't work if the selected object isn't a mesh
+- Dedicated Sidebar menu to house all the functions the plugin has
+- Most functions work in bulk and report to the user specific information
+- Context aware; They wouldn't work if the selected object isn't a mesh or lacks the data required to execute the functions
+
+# Functions
+### Removers
+- Remove Vertex Groups
+- Remove Modifiers
+- Remove Shape Keys
+- Remove UV Maps
+- Remove Materials
+- Remove Unused Vertex Groups *(Weights below 0.100 won't be deleted)*
+
+### Utilities
+- Check Shape Key Count
+- Flip UV Maps Horizontally
+- Flip UV Maps Vertically
+- Quickly Add Custom Vertex Colors
 
 # Installation Instructions
 1. Grab the latest release from the Releases page or download the repository's code as a ZIP file.
