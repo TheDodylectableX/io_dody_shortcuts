@@ -3,7 +3,7 @@
 # --------
 
 import bpy
-import bmesh
+import numpy as np
 
 # -------------------
 # PLUGIN INFORMATION
@@ -12,7 +12,7 @@ import bmesh
 bl_info = {
     "name": "Dody's Shortcuts",
     "author": "Dodylectable",
-    "version": (1, 0, 2),
+    "version": (1, 0, 3),
     "blender": (4, 0, 0),
     "category": "Interface",
     "location": "View 3D -> Side Bar",
@@ -49,6 +49,10 @@ class RemovePanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
+        # =============
+        # THE REMOVERS
+        # =============
+
         row = layout.row()
         row.operator("object.remove_vertex_groups", text="Remove Vertex Groups")
         
@@ -72,9 +76,12 @@ class RemovePanel(bpy.types.Panel):
 
         layout.separator()
 
+        # ============
+        # THE HELPERS
+        # ============
+
         row = layout.row()
         row.operator("object.check_shapekey_count", text="Check Shape Key Count")
-
 
         row = layout.row()
         row.operator("object.flip_uv_horizontally", text="Flip UV Maps Horizontally")
@@ -84,6 +91,12 @@ class RemovePanel(bpy.types.Panel):
 
         row = layout.row()
         row.operator("object.add_custom_vertex_color", text="Quickly Add Custom Vertex Colors")
+
+        row = layout.row()
+        row.operator("object.project_key_to_color", text="Project Shape Key to Vertex Color")
+
+        row = layout.row()
+        row.operator("object.batch_tris_to_quads", text="Batch Convert Tris to Quads")
 
 # --------
 # CLASSES
@@ -345,10 +358,7 @@ class CheckShapeKeyCount(bpy.types.Operator):
         if active_object.data.shape_keys:
             shape_keys = active_object.data.shape_keys.key_blocks
             key_names = [key.name for key in shape_keys]
-            self.report(
-                {'INFO'},
-                f"Object '{active_object.name}' has {len(shape_keys)} Shape Keys: {', '.join(key_names)}."
-            )
+            self.report({'INFO'},f"Object '{active_object.name}' has {len(shape_keys)} Shape Keys: {', '.join(key_names)}.")
         else:
             self.report({'WARNING'}, f"Object '{active_object.name}' has no Shape Keys.")
         return {'FINISHED'}
@@ -505,12 +515,159 @@ class AddCustomVertexColorOperator(bpy.types.Operator):
                 processed_objects.append(obj.name)
 
         if processed_objects:
-            self.report(
-                {'INFO'},
-                f"Vertex Color '{self.color_name}' added to {len(processed_objects)} object(s): {', '.join(processed_objects)}"
-            )
+            self.report({'INFO'}, f"Vertex Color '{self.color_name}' added to {len(processed_objects)} object(s): {', '.join(processed_objects)}")
         else:
             self.report({'WARNING'}, "No valid objects to process.")
+
+        return {'FINISHED'}
+
+# --------------------------------------------------------------------------------------------------------------
+
+def get_shape_keys(self, context):
+    """Dynamically fetch shape keys when the operator is invoked."""
+    obj = context.object
+    if obj and obj.type == 'MESH' and obj.data.shape_keys:
+        return [(key.name, key.name, "") for key in obj.data.shape_keys.key_blocks if key.name != "Basis"]
+    return [("NONE", "No Shape Keys", "No shape keys available")]
+
+class ProjectShapeKeyToVertexColorOperator(bpy.types.Operator):
+    """Project a Shape Key's delta data into a Vertex Color Attribute"""
+    bl_idname = "object.project_key_to_color"
+    bl_label = "Project Shape Key to Vertex Color"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    shape_key_name: bpy.props.EnumProperty(
+        name="Shape Key",
+        description="Select the shape key to process",
+        items=get_shape_keys  # Dynamically fetch shape keys
+    ) # type: ignore
+
+    displacement_value: bpy.props.FloatProperty(
+        name="Displacement Value",
+        description="Normalization value for displacement scaling",
+        default=2.1943,
+        min=0.001,  # Prevents division by zero
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.object and context.object.type == 'MESH' and context.object.data.shape_keys
+
+    def invoke(self, context, event):
+        """Fetch shape keys dynamically before showing UI"""
+        obj = context.object
+        if obj and obj.data.shape_keys:
+            shape_keys = get_shape_keys(self, context)
+            if shape_keys and shape_keys[0][0] != "NONE":
+                self.shape_key_name = shape_keys[0][0]  # Default to first available shape key
+
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        """Draw dropdown menu for shape key selection"""
+        layout = self.layout
+        layout.prop(self, "shape_key_name", text="Shape Key")
+        layout.prop(self, "displacement_value")
+
+    def execute(self, context):
+        """Runs the conversion from shape key to vertex color"""
+        obj = context.object
+        if not obj or obj.type != 'MESH' or not obj.data.shape_keys:
+            self.report({'ERROR'}, "No valid mesh object with shape keys selected.")
+            return {'CANCELLED'}
+
+        if self.shape_key_name not in obj.data.shape_keys.key_blocks:
+            self.report({'ERROR'}, f"Shape key '{self.shape_key_name}' not found on object '{obj.name}'.")
+            return {'CANCELLED'}
+
+        self.shape_key_to_vector_color(obj, self.shape_key_name, self.displacement_value)
+        return {'FINISHED'}
+
+    def shape_key_to_vector_color(self, obj, shape_key_name, displacement_value):
+        """
+        Converts the raw delta vector data of a shape key into a vertex color map (RGB visualization).
+        Areas with no morphing will be colored in #808080 (neutral gray).
+        """
+
+        shape_keys = obj.data.shape_keys.key_blocks
+        basis_key = shape_keys["Basis"]
+        target_key = shape_keys[shape_key_name]
+
+        # Get vertex positions from both shape keys
+        basis_vertices = np.array([v.co for v in basis_key.data])
+        target_vertices = np.array([v.co for v in target_key.data])
+
+        # Compute raw delta vectors per vertex
+        deltas = target_vertices - basis_vertices
+
+        # Normalize XYZ vectors from (-max, +max) to (0, 1)
+        normalized_deltas = (((deltas / displacement_value) / 2) + 0.5)
+
+        # Define the hex color #808080 (mid gray) as RGB (0–1 range)
+        no_morph_color = (0.5, 0.5, 0.5, 1.0)
+
+        # Name the vertex color layer after the shape key
+        color_layer_name = f"{shape_key_name}_Vectors"
+
+        # Ensure a vertex color layer exists
+        color_layer = obj.data.color_attributes.get(color_layer_name)
+        if not color_layer:
+            color_layer = obj.data.color_attributes.new(name=color_layer_name, type='BYTE_COLOR', domain='POINT')
+
+        # Assign the raw vector displacement to vertex colors
+        for i, color in enumerate(color_layer.data):
+            r, g, b = normalized_deltas[i]
+            if np.allclose(deltas[i], 0, atol=1e-6):
+                color.color = no_morph_color
+            else:
+                color.color = (r, g, b, 1.0)
+
+        # Update mesh to reflect changes
+        obj.data.update()
+
+        self.report({'INFO'}, f"Vertex color '{color_layer_name}' created from shape key '{shape_key_name}' on '{obj.name}'.")
+
+# --------------------------------------------------------------------------------------------------------------
+
+class ConvertTrisToQuadsOperator(bpy.types.Operator):
+    """Convert triangles to quads while preserving UV boundaries"""
+    bl_idname = "object.batch_tris_to_quads"
+    bl_label = "Batch Convert Triangles to Quads"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        """Ensure at least one selected mesh exists"""
+        return context.selected_objects and any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def execute(self, context):
+        """Convert triangles to quads on all selected mesh objects"""
+        converted_objects = 0
+
+        for obj in context.selected_objects:
+            if obj.type == 'MESH':
+                # Switch to Edit Mode
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+                # Select all faces
+                bpy.ops.mesh.select_all(action='SELECT')
+
+                # Run Tris to Quads with "Compare UVs" enabled
+                bpy.ops.mesh.tris_convert_to_quads(uvs=True, face_threshold=180, shape_threshold=180)
+
+                # Return to Object Mode
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+                converted_objects += 1
+
+        if converted_objects > 0:
+            if converted_objects == 1:
+                self.report({'INFO'}, f"Converted triangles to quads in '{context.active_object.name}'.")
+            else:
+                self.report({'INFO'}, f"Converted triangles to quads in {converted_objects} objects.")
+        else:
+            self.report({'WARNING'}, "No valid meshes with triangles found.")
 
         return {'FINISHED'}
 
@@ -529,4 +686,6 @@ classes = [
     FlipUVHorizontallyOperator,
     FlipUVVerticallyOperator,
     AddCustomVertexColorOperator,
+    ProjectShapeKeyToVertexColorOperator,
+    ConvertTrisToQuadsOperator,
 ]
