@@ -20,6 +20,8 @@
 - Flip UV Maps Horizontally
 - Flip UV Maps Vertically
 - Quickly Add Custom Vertex Colors
+- Project Shape Key to Vertex Color
+- Batch Convert Tris to Quads
 
 # Installation Instructions
 1. Grab the latest release from the Releases page or download the repository's code as a ZIP file.
