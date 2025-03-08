@@ -173,7 +173,7 @@ class RemoveVertexColorsOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.object and context.object.type == 'MESH' and context.object.data.vertex_colors
+        return context.selected_objects and any(obj.type == 'MESH' and any(att.data_type in {'FLOAT_COLOR', 'BYTE_COLOR'} for att in obj.data.attributes) for obj in context.selected_objects)
 
     def execute(self, context):
         removed_colors_report = {}
@@ -614,9 +614,9 @@ class ProjectShapeKeyToVertexColorOperator(bpy.types.Operator):
         color_layer_name = f"{shape_key_name}_Vectors"
 
         # Ensure a vertex color layer exists
-        color_layer = obj.data.vertex_colors.get(color_layer_name)
+        color_layer = obj.data.color_attributes.get(color_layer_name)
         if not color_layer:
-            color_layer = obj.data.vertex_colors.new(name=color_layer_name, type='BYTE_COLOR', domain='POINT')
+            color_layer = obj.data.color_attributes.new(name=color_layer_name, type='BYTE_COLOR', domain='POINT')
 
         # Assign the raw vector displacement to vertex colors
         for i, color in enumerate(color_layer.data):
