@@ -17,10 +17,9 @@
 
 ### Utilities
 - Check Shape Key Count
-- Flip UV Maps Horizontally
-- Flip UV Maps Vertically
-- Quickly Add Custom Vertex Colors
-- Project Shape Key to Vertex Color
+- Flip UV Maps Horizontally and Vertically (Works in batch)
+- Quickly Add Custom Vertex Colors (Works in batch)
+- Project Shape Key to Vertex Color and Vertex Color to Shape Key
 - Batch Convert Tris to Quads
 
 # Installation Instructions

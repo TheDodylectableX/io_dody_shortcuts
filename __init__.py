@@ -4,6 +4,7 @@
 
 import bpy
 import numpy as np
+import mathutils
 
 # -------------------
 # PLUGIN INFORMATION
@@ -12,7 +13,7 @@ import numpy as np
 bl_info = {
     "name": "Dody's Shortcuts",
     "author": "Dodylectable",
-    "version": (1, 0, 3),
+    "version": (1, 0, 4),
     "blender": (4, 0, 0),
     "category": "Interface",
     "location": "View 3D -> Side Bar",
@@ -96,6 +97,9 @@ class RemovePanel(bpy.types.Panel):
         row.operator("object.project_key_to_color", text="Project Shape Key to Vertex Color")
 
         row = layout.row()
+        row.operator("object.project_color_to_key", text="Project Vertex Color to Shape Key")
+
+        row = layout.row()
         row.operator("object.batch_tris_to_quads", text="Batch Convert Tris to Quads")
 
 # --------
@@ -169,7 +173,7 @@ class RemoveVertexColorsOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.selected_objects and any(obj.type == 'MESH' and any(att.data_type in {'FLOAT_COLOR', 'BYTE_COLOR'} for att in obj.data.attributes) for obj in context.selected_objects)
+        return context.object and context.object.type == 'MESH' and context.object.data.vertex_colors
 
     def execute(self, context):
         removed_colors_report = {}
@@ -610,9 +614,9 @@ class ProjectShapeKeyToVertexColorOperator(bpy.types.Operator):
         color_layer_name = f"{shape_key_name}_Vectors"
 
         # Ensure a vertex color layer exists
-        color_layer = obj.data.color_attributes.get(color_layer_name)
+        color_layer = obj.data.vertex_colors.get(color_layer_name)
         if not color_layer:
-            color_layer = obj.data.color_attributes.new(name=color_layer_name, type='BYTE_COLOR', domain='POINT')
+            color_layer = obj.data.vertex_colors.new(name=color_layer_name, type='BYTE_COLOR', domain='POINT')
 
         # Assign the raw vector displacement to vertex colors
         for i, color in enumerate(color_layer.data):
@@ -626,6 +630,106 @@ class ProjectShapeKeyToVertexColorOperator(bpy.types.Operator):
         obj.data.update()
 
         self.report({'INFO'}, f"Vertex color '{color_layer_name}' created from shape key '{shape_key_name}' on '{obj.name}'.")
+
+# --------------------------------------------------------------------------------------------------------------
+
+def get_vertex_color_layers(self, context):
+    """Fetch available vertex color layers dynamically using vertex_colors."""
+    obj = context.object
+    if obj and obj.type == 'MESH' and obj.data.vertex_colors:
+        return [(layer.name, layer.name, "") for layer in obj.data.vertex_colors]
+    return [("NONE", "No Vertex Colors", "No vertex color layers available")]
+
+class ProjectVertexColorToShapeKeyOperator(bpy.types.Operator):
+    """Project a Vertex Color Attribute to a Shape Key"""
+    bl_idname = "object.project_color_to_key"
+    bl_label = "Project Vertex Color to Shape Key"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    color_layer: bpy.props.EnumProperty(
+        name="Vertex Color Layer",
+        description="Select the vertex color layer to use for projection",
+        items=get_vertex_color_layers
+    ) # type: ignore
+
+    displacement_value: bpy.props.FloatProperty(
+        name="Displacement Value",
+        description="Normalization value for displacement scaling",
+        default=2.1943,
+        min=0.001  # Prevents division by zero
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return context.object and context.object.type == 'MESH' and context.object.data.vertex_colors
+
+    def invoke(self, context, event):
+        """Show the UI dialog before executing"""
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        """Draw UI properties"""
+        layout = self.layout
+        layout.prop(self, "color_layer")
+        layout.prop(self, "displacement_value")
+
+    def execute(self, context):
+        """Run the vertex color to shape key conversion"""
+        obj = context.object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No valid mesh object selected.")
+            return {'CANCELLED'}
+
+        success, color_layer_name, shape_key_name = self.vertex_color_to_morph(obj, self.color_layer, self.displacement_value)
+        if success:
+            self.report({'INFO'}, f"Vertex color '{color_layer_name}' projected to shape key '{shape_key_name}'.")
+        else:
+            self.report({'ERROR'}, "Vertex color projection failed.")
+        return {'FINISHED'} if success else {'CANCELLED'}
+
+    def vertex_color_to_morph(self, obj, color_layer_name, displacement_value):
+        """Converts vertex colors to shape key offsets"""
+        mesh = obj.data
+
+        # Fetch selected vertex color layer
+        vcol_layer = mesh.vertex_colors.get(color_layer_name)
+        if not vcol_layer:
+            self.report({'WARNING'}, f"Vertex color layer '{color_layer_name}' not found.")
+            return False, None, None
+
+        # Ensure Basis shape key exists
+        if not mesh.shape_keys:
+            obj.shape_key_add(name="Basis")
+
+        # Create new shape key
+        morph_key_name = f"{color_layer_name}_Morph"
+        morph_key = obj.shape_key_add(name=morph_key_name)
+
+        # Prepare data storage
+        vertex_colors = {i: mathutils.Vector((0, 0, 0)) for i in range(len(mesh.vertices))}
+        vertex_counts = {i: 0 for i in range(len(mesh.vertices))}
+
+        # Loop through loops to collect vertex color data
+        color_data = vcol_layer.data
+        for loop in mesh.loops:
+            vert_index = loop.vertex_index
+            color = color_data[loop.index].color  # Get (R, G, B, A)
+
+            # Convert RGB to displacement offset
+            offset = mathutils.Vector((color[0] - 0.5, color[1] - 0.5, color[2] - 0.5))
+
+            # Accumulate per vertex
+            vertex_colors[vert_index] += offset
+            vertex_counts[vert_index] += 1
+
+        # Apply average displacement to each vertex
+        for vert in mesh.vertices:
+            if vertex_counts[vert.index] > 0:
+                avg_offset = vertex_colors[vert.index] / vertex_counts[vert.index]
+                new_position = vert.co + (avg_offset * 2 * displacement_value)
+                morph_key.data[vert.index].co = new_position
+
+        return True, color_layer_name, morph_key.name
 
 # --------------------------------------------------------------------------------------------------------------
 
@@ -687,5 +791,6 @@ classes = [
     FlipUVVerticallyOperator,
     AddCustomVertexColorOperator,
     ProjectShapeKeyToVertexColorOperator,
+    ProjectVertexColorToShapeKeyOperator,
     ConvertTrisToQuadsOperator,
 ]
