@@ -9,18 +9,20 @@
 # Functions
 ### Removers
 - Remove Vertex Groups
+- Remove Unused Vertex Groups *(Only empty VGs will be deleted)*
 - Remove Modifiers
 - Remove Shape Keys
 - Remove UV Maps
 - Remove Materials
-- Remove Unused Vertex Groups *(Weights below 0.100 won't be deleted)*
 
 ### Utilities
-- Check Shape Key Count
-- Flip UV Maps Horizontally and Vertically (Works in batch)
-- Quickly Add Custom Vertex Colors (Works in batch)
+- Check Mesh Shape Key Count
+- Flip UV Maps Horizontally and Vertically (Works in bulk)
+- Quickly Add Custom Vertex Colors (Works in bulk)
 - Project Shape Key to Vertex Color and Vertex Color to Shape Key
-- Batch Convert Tris to Quads
+- Batch Convert Mesh Tris to Quads
+- Retarget Armatures
+- Make Collections Per Meshes
 
 # Installation Instructions
 1. Grab the latest release from the Releases page or download the repository's code as a ZIP file.

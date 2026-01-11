@@ -3,8 +3,10 @@
 # --------
 
 import bpy
+from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty
 import numpy as np
 import mathutils
+import re
 
 # -------------------
 # PLUGIN INFORMATION
@@ -13,7 +15,7 @@ import mathutils
 bl_info = {
     "name": "Dody's Shortcuts",
     "author": "Dodylectable",
-    "version": (1, 0, 4),
+    "version": (1, 0, 5),
     "blender": (4, 0, 0),
     "category": "Interface",
     "location": "View 3D -> Side Bar",
@@ -40,7 +42,7 @@ if __name__ == "__init__":
 # THE PANEL
 # ----------
 
-class RemovePanel(bpy.types.Panel):
+class DodyPanel(bpy.types.Panel):
     bl_label = "Dody's Shortcuts"
     bl_idname = "OBJECT_PT_remove"
     bl_space_type = "VIEW_3D"
@@ -56,6 +58,9 @@ class RemovePanel(bpy.types.Panel):
 
         row = layout.row()
         row.operator("object.remove_vertex_groups", text="Remove Vertex Groups")
+
+        row = layout.row()
+        row.operator("object.remove_unused_vertex_groups", text="Remove Unused Vertex Groups")
         
         row = layout.row()
         row.operator("object.remove_modifiers", text="Remove Modifiers")
@@ -71,9 +76,6 @@ class RemovePanel(bpy.types.Panel):
 
         row = layout.row()
         row.operator("object.remove_materials", text="Remove Materials")
-
-        row = layout.row()
-        row.operator("object.remove_unused_vertex_groups", text="Remove Unused Vertex Groups")
 
         layout.separator()
 
@@ -101,6 +103,12 @@ class RemovePanel(bpy.types.Panel):
 
         row = layout.row()
         row.operator("object.batch_tris_to_quads", text="Batch Convert Tris to Quads")
+
+        row = layout.row()
+        row.operator("object.retarget_armatures", text="Retarget Armatures")
+
+        row = layout.row()
+        row.operator("object.make_collection_per_mesh", text="Make Collection Per Mesh")
 
 # --------
 # CLASSES
@@ -300,7 +308,6 @@ class RemoveUnusedVertexGroupsOperator(bpy.types.Operator):
 
     def execute(self, context):
         selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        threshold = 0.1  # All groups below this threshold will be considered unused
         removed_groups_report = {}
 
         for obj in selected_objects:
@@ -317,7 +324,7 @@ class RemoveUnusedVertexGroupsOperator(bpy.types.Operator):
                 # Check each vertex for weights in this group
                 for vertex in mesh.vertices:
                     for group_weight in vertex.groups:
-                        if group_weight.group == group.index and group_weight.weight > threshold:
+                        if group_weight.group == group.index:
                             is_used = True
                             break
                     if is_used:
@@ -776,9 +783,183 @@ class ConvertTrisToQuadsOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 # --------------------------------------------------------------------------------------------------------------
+
+def enum_armatures(self, context):
+    objs = (context.scene.objects if context else bpy.data.objects)
+    return [(o.name, o.name, "") for o in objs if o.type == 'ARMATURE']
+
+def matrices_equals(mat1, mat2, epsilon=0.0001):
+    # Element-wise comparison
+    for i in range(4):
+        for j in range(4):
+            if abs(mat1[i][j] - mat2[i][j]) >= epsilon:
+                return False
+    return True
+
+class RetargetArmaturesOperator(bpy.types.Operator):
+    """Retarget one armature's set of bones to another (Must share bone names and manually apply new transforms afterwards)"""
+    bl_idname = "object.retarget_armatures"
+    bl_label = "Retarget Armatures"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    source_name: bpy.props.EnumProperty(
+        name="Source Armature",
+        description="Armature to copy pose from",
+        items=enum_armatures,
+    ) # type: ignore
+    target_name: bpy.props.EnumProperty(
+        name="Target Armature",
+        description="Armature to paste pose onto",
+        items=enum_armatures,
+    ) # type: ignore
+    threshold: bpy.props.FloatProperty(
+        name="Retarget Threshold",
+        default=0.0001,
+        min=0.0,
+        precision=6,
+    ) # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        """Ensure at least one selected armature exists"""
+        return context.selected_objects and len([o for o in context.selected_objects if o.type == 'ARMATURE']) >= 2
+
+    def invoke(self, context, event):
+        # If exactly two armatures are selected, prefill them
+        arms = [o for o in context.selected_objects if o.type == 'ARMATURE']
+        if len(arms) == 2:
+            self.source_name = arms[0].name
+            self.target_name = arms[1].name
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = True
+
+        col = layout.column(align=True)
+        col.prop(self, "source_name", text="Source Armature")
+        col.prop(self, "target_name", text="Target Armature")
+
+        col.separator()
+        col.prop(self, "threshold", text="Threshold")
+
+    def execute(self, context):
+        src = bpy.data.objects.get(self.source_name)
+        tgt = bpy.data.objects.get(self.target_name)
+
+        if not src or not tgt:
+            self.report({'ERROR'}, "Invalid source/target armature.")
+            return {'CANCELLED'}
+        if src.type != 'ARMATURE' or tgt.type != 'ARMATURE':
+            self.report({'ERROR'}, "Both must be armatures.")
+            return {'CANCELLED'}
+        if src == tgt:
+            self.report({'ERROR'}, "Source and Target Armatures must be different!")
+            return {'CANCELLED'}
+
+        # Switch to Pose Mode on target
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.context.view_layer.objects.active = tgt
+        bpy.ops.object.mode_set(mode='POSE')
+
+        matched = 0
+        skipped = 0
+
+        bpy.ops.pose.visual_transform_apply()
+
+        for tgt_bone in tgt.pose.bones:
+            name = tgt_bone.name
+            src_bone = src.pose.bones.get(name)
+            if not src_bone:
+                continue
+
+            # Compare world-space matrices
+            src_matrix = src.matrix_world @ src_bone.matrix
+            tgt_matrix = tgt.matrix_world @ tgt_bone.matrix
+            if matrices_equals(src_matrix, tgt_matrix, self.threshold):
+                skipped += 1
+                continue
+
+            # Add constraints
+            loc = tgt_bone.constraints.new(type='COPY_LOCATION')
+            loc.name = "Copy Location"
+            loc.target = src
+            loc.subtarget = name
+
+            rot = tgt_bone.constraints.new(type='COPY_ROTATION')
+            rot.name = "Copy Rotation"
+            rot.target = src
+            rot.subtarget = name
+            rot.target_space = 'POSE'
+            rot.owner_space = 'POSE'
+
+            scl = tgt_bone.constraints.new(type='COPY_SCALE')
+            scl.name = "Copy Scale"
+            scl.target = src
+            scl.subtarget = name
+
+            matched += 1
+
+        # Apply and bake pose transforms
+        bpy.ops.pose.select_all(action='SELECT')
+        bpy.ops.pose.visual_transform_apply()
+
+        # Remove the temporary constraints
+        for bone in tgt.pose.bones:
+            for c in list(bone.constraints):
+                if c.type in {'COPY_LOCATION', 'COPY_ROTATION', 'COPY_SCALE'}:
+                    bone.constraints.remove(c)
+
+        self.report({'INFO'}, f"Applied transforms to {matched} bones. Skipped {skipped} bones.")
+        return {'FINISHED'}
+
+# --------------------------------------------------------------------------------------------------------------
+
+class MakeCollectionPerMesh(bpy.types.Operator):
+    """Makes a collection per mesh in your scene with the same name"""
+    bl_idname = "object.make_collection_per_mesh"
+    bl_label = "Make Collection Per Mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.selected_objects is not None and any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def execute(self, context):
+        # Filter selection to only meshes to avoid logic errors with lights/cameras
+        mesh_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
         
+        # Track counts for the report at the end
+        created_count = 0
+        
+        for obj in mesh_objects:
+            col_name = obj.name
+            
+            # Check if a collection with this name already exists, if it does then we'll use it; otherwise we'll create a new one
+            new_col = bpy.data.collections.get(col_name)
+            if not new_col:
+                new_col = bpy.data.collections.new(col_name)
+                # Link the new collection to the scene's master collection (Scene Collection)
+                context.scene.collection.children.link(new_col)
+                created_count += 1
+            
+            # An object can be in multiple collections. To move it we link it to the new one and unlink it from all others.
+            if obj.name not in new_col.objects:
+                new_col.objects.link(obj)
+            
+            # Unlink from all other collections in the current scene
+            for col in obj.users_collection:
+                if col != new_col:
+                    col.objects.unlink(obj)
+        
+        self.report({'INFO'}, f"Processed {len(mesh_objects)} objects. Created {created_count} new collections.")
+        return {'FINISHED'}
+
+# --------------------------------------------------------------------------------------------------------------
+
 classes = [
-    RemovePanel,
+    DodyPanel,
     RemoveVertexGroupsOperator,
     RemoveModifiersOperator,
     RemoveVertexColorsOperator,
@@ -793,4 +974,8 @@ classes = [
     ProjectShapeKeyToVertexColorOperator,
     ProjectVertexColorToShapeKeyOperator,
     ConvertTrisToQuadsOperator,
+    RetargetArmaturesOperator,
+    MakeCollectionPerMesh,
 ]
+
+# --------------------------------------------------------------------------------------------------------------
