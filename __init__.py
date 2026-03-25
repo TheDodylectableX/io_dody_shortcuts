@@ -15,7 +15,7 @@ import re
 bl_info = {
     "name": "Dody's Shortcuts",
     "author": "Dodylectable",
-    "version": (1, 0, 6),
+    "version": (1, 0, 7),
     "blender": (4, 0, 0),
     "category": "Interface",
     "location": "View 3D -> Side Bar",
@@ -72,10 +72,16 @@ class DodyPanel(bpy.types.Panel):
         row.operator("object.remove_shape_keys", text="Remove Shape Keys")
 
         row = layout.row()
+        row.operator("object.remove_unused_shape_keys", text="Remove Unused Shape Keys")
+
+        row = layout.row()
         row.operator("object.remove_uv_maps", text="Remove UV Maps")
 
         row = layout.row()
         row.operator("object.remove_materials", text="Remove Materials")
+
+        row = layout.row()
+        row.operator("object.remove_unused_materials", text="Remove Unused Materials")
 
         layout.separator()
 
@@ -84,13 +90,16 @@ class DodyPanel(bpy.types.Panel):
         # ============
 
         row = layout.row()
-        row.operator("object.check_shapekey_count", text="Check Shape Key Count")
+        row.operator("object.apply_modifiers", text="Apply All Modifiers")
 
         row = layout.row()
         row.operator("object.flip_uv_horizontally", text="Flip UV Maps Horizontally")
 
         row = layout.row()
         row.operator("object.flip_uv_vertically", text="Flip UV Maps Vertically")
+
+        row = layout.row()
+        row.operator("object.check_shapekey_count", text="Check Shape Key Count")
 
         row = layout.row()
         row.operator("object.project_key_to_color", text="Project Shape Key to Vertex Color")
@@ -259,6 +268,64 @@ class RemoveShapeKeysOperator(bpy.types.Operator):
     
 # --------------------------------------------------------------------------------------------------------------
     
+class RemoveUnusedShapeKeysOperator(bpy.types.Operator):
+    """Remove shape keys that do not deform any vertices compared to their basis"""
+    bl_idname = "object.remove_unused_shape_keys"
+    bl_label = "Remove Unused Shape Keys"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # Threshold for "no change" - handles tiny float offsets
+    EPSILON = 0.00001
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.type == 'MESH' and obj.data.shape_keys for obj in context.selected_objects)
+
+    def execute(self, context):
+        selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj.data.shape_keys]
+        total_removed = 0
+        
+        report_data = {}
+
+        for obj in selected_objects:
+            key_blocks = obj.data.shape_keys.key_blocks
+            removed_from_this_obj = []
+            
+            for key in list(key_blocks):
+                if key == key.relative_key:
+                    continue
+                
+                basis_data = key.relative_key.data
+                key_data = key.data
+                is_deformed = False
+                
+                for i in range(len(key_data)):
+                    if (key_data[i].co - basis_data[i].co).length > self.EPSILON:
+                        is_deformed = True
+                        break
+                
+                if not is_deformed:
+                    removed_from_this_obj.append(key.name)
+                    obj.shape_key_remove(key)
+                    total_removed += 1
+
+            if removed_from_this_obj:
+                report_data[obj.name] = removed_from_this_obj
+
+        if total_removed == 0:
+            self.report({'INFO'}, "Cleanup complete: No empty shape keys found.")
+        else:
+            for obj_name, keys in report_data.items():
+                keys_str = ", ".join(keys)
+                message = f"{obj_name}: Removed ({len(keys)}) keys: [{keys_str}]"
+                
+                print(message)
+                self.report({'INFO'}, message)
+
+        return {'FINISHED'}
+    
+# --------------------------------------------------------------------------------------------------------------
+    
 class RemoveUVMapsOperator(bpy.types.Operator):
     """Remove all UV Maps from the selected objects"""
     bl_idname = "object.remove_uv_maps"
@@ -319,6 +386,45 @@ class RemoveMaterialsOperator(bpy.types.Operator):
     
 # --------------------------------------------------------------------------------------------------------------
 
+class RemoveUnusedMaterialsOperator(bpy.types.Operator):
+    """Remove material slots that aren't assigned to any faces"""
+    bl_idname = "object.remove_unused_materials"
+    bl_label = "Remove Unused Materials"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.type == 'MESH' and obj.material_slots for obj in context.selected_objects)
+
+    def execute(self, context):
+        selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        
+        for obj in selected_objects:
+            mesh = obj.data
+            
+            used_indices = {p.material_index for p in mesh.polygons}
+            
+            initial_slot_count = len(obj.material_slots)
+            removed_names = []
+
+            for i in range(initial_slot_count - 1, -1, -1):
+                if i not in used_indices:
+                    slot = obj.material_slots[i]
+                    mat_name = slot.material.name if slot.material else f"Empty Slot {i}"
+                    removed_names.append(mat_name)
+                    
+                    obj.active_material_index = i
+                    bpy.ops.object.material_slot_remove()
+
+            if removed_names:
+                self.report({'INFO'}, f"{obj.name}: Removed {len(removed_names)} slots ({', '.join(removed_names)})")
+            else:
+                self.report({'INFO'}, f"{obj.name}: No unused materials found.")
+
+        return {'FINISHED'}
+    
+# --------------------------------------------------------------------------------------------------------------
+
 class RemoveUnusedVertexGroupsOperator(bpy.types.Operator):
     """Remove unused vertex groups from selected objects and normalize weights"""
     bl_idname = "object.remove_unused_vertex_groups"
@@ -331,47 +437,100 @@ class RemoveUnusedVertexGroupsOperator(bpy.types.Operator):
 
     def execute(self, context):
         selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        removed_groups_report = {}
-
+        
         for obj in selected_objects:
-            if not obj.vertex_groups:
-                continue
-
             mesh = obj.data
-            vertex_groups = obj.vertex_groups
-            groups_to_remove = []
+            v_groups = obj.vertex_groups
+            
+            used_indices = set()
+            for v in mesh.vertices:
+                for g in v.groups:
+                    if g.weight > 0.0001:
+                        used_indices.add(g.group)
 
-            for group in vertex_groups:
-                is_used = False
+            all_groups = list(v_groups)
+            removed_count = 0
+            
+            to_delete = [g for g in all_groups if g.index not in used_indices]
+            
+            for g in to_delete:
+                v_groups.remove(g)
+                removed_count += 1
 
-                # Check each vertex for weights in this group
-                for vertex in mesh.vertices:
-                    for group_weight in vertex.groups:
-                        if group_weight.group == group.index:
-                            is_used = True
-                            break
-                    if is_used:
-                        break
+            if removed_count > 0:
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.vertex_group_normalize_all(lock_active=False)
+                self.report({'INFO'}, f"{obj.name}: Removed {removed_count} unused groups.")
 
-                if not is_used:
-                    groups_to_remove.append(group.name)
+        return {'FINISHED'}
 
-            # Remove unused groups and add them to the report
-            for group_name in groups_to_remove:
-                vertex_groups.remove(vertex_groups[group_name])
-            if groups_to_remove:
-                removed_groups_report[obj.name] = groups_to_remove
+# --------------------------------------------------------------------------------------------------------------
 
-            # Normalize weights
-            bpy.context.view_layer.objects.active = obj
-            bpy.ops.object.vertex_group_normalize_all(lock_active=False)
+class ApplyAllModifiersOperator(bpy.types.Operator):
+    """Apply all modifiers on selected objects (skipping Armatures by default)"""
+    bl_idname = "object.apply_modifiers"
+    bl_label = "Bulk Apply Modifiers"
+    bl_options = {'REGISTER', 'UNDO'}
 
-        if not removed_groups_report:
-            self.report({'INFO'}, "No unused vertex groups found.")
-        else:
-            for obj_name, groups in removed_groups_report.items():
-                self.report({'INFO'}, f"Removed groups from '{obj_name}': {', '.join(groups)}")
+    # Set this to True if you want to bake the skeleton pose into the mesh
+    apply_armature: bpy.props.BoolProperty(
+        name="Apply Armatures",
+        description="If disabled: Armature modifiers will be skipped to preserve rigging.",
+        default=False
+    ) # type: ignore
 
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        column = layout.column(align=True)
+        
+        column.label(text="Options:", icon='SETTINGS')
+        column.prop(self, "apply_armature", text="Apply Armature Modifiers", icon='ARMATURE_DATA')
+        
+        column.separator()
+        column.label(text="Warning: This action cannot be undone!", icon='ERROR')
+
+    def execute(self, context):
+        targets = [obj for obj in bpy.data.objects if obj.type == 'MESH']
+        
+        if not targets:
+            self.report({'WARNING'}, "No mesh objects found in the scene.")
+            return {'CANCELLED'}
+
+        apply_count = 0
+        obj_count = 0
+
+        original_active = context.view_layer.objects.active
+
+        for obj in targets:
+            if obj.name not in context.view_layer.objects:
+                continue
+                
+            context.view_layer.objects.active = obj
+            
+            modifiers = obj.modifiers[:]
+            
+            for mod in modifiers:
+                if mod.type == 'ARMATURE' and not self.apply_armature:
+                    continue
+                
+                try:
+                    bpy.ops.object.modifier_apply(modifier=mod.name)
+                    apply_count += 1
+                except Exception as e:
+                    self.report({'ERROR'}, f"{obj.name}: Could not apply {mod.name}. Is the object hidden?")
+            
+            obj_count += 1
+
+        context.view_layer.objects.active = original_active
+
+        self.report({'INFO'}, f"Applied {apply_count} modifiers applied across {obj_count} meshes.")
         return {'FINISHED'}
 
 # --------------------------------------------------------------------------------------------------------------
@@ -1035,11 +1194,11 @@ class RetargetArmaturesOperator(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     source_name: bpy.props.EnumProperty(
-        name="Source Armature",
-        description="Armature to copy pose from",
+        name="Target Armature",
+        description="Armature to paste pose onto",
         items=enum_armatures,
     ) # type: ignore
-    source_name: bpy.props.EnumProperty(
+    target_name: bpy.props.EnumProperty(
         name="Target Armature",
         description="Armature to paste pose onto",
         items=enum_armatures,
@@ -1061,7 +1220,7 @@ class RetargetArmaturesOperator(bpy.types.Operator):
         arms = [o for o in context.selected_objects if o.type == 'ARMATURE']
         if len(arms) == 2:
             self.source_name = arms[0].name
-            self.source_name = arms[1].name
+            self.target_name = arms[1].name
         return context.window_manager.invoke_props_dialog(self)
 
     def draw(self, context):
@@ -1071,14 +1230,14 @@ class RetargetArmaturesOperator(bpy.types.Operator):
 
         col = layout.column(align=True)
         col.prop(self, "source_name", text="Source Armature")
-        col.prop(self, "source_name", text="Target Armature")
+        col.prop(self, "target_name", text="Target Armature")
 
         col.separator()
         col.prop(self, "threshold", text="Threshold")
 
     def execute(self, context):
         src = bpy.data.objects.get(self.source_name)
-        tgt = bpy.data.objects.get(self.source_name)
+        tgt = bpy.data.objects.get(self.target_name)
 
         if not src or not tgt:
             self.report({'ERROR'}, "Invalid source/target armature.")
@@ -1394,7 +1553,10 @@ classes = [
     RemoveUVMapsOperator,
     RemoveMaterialsOperator,
     RemoveUnusedVertexGroupsOperator,
+    RemoveUnusedShapeKeysOperator,
+    RemoveUnusedMaterialsOperator,
 
+    ApplyAllModifiersOperator,
     CheckShapeKeyCount,
     FlipUVHorizontallyOperator,
     FlipUVVerticallyOperator,

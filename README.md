@@ -13,8 +13,10 @@
 - Remove Modifiers*
 - Remove Vertex Colors*
 - Remove Shape Keys*
+- Remove Unused Shape Keys*
 - Remove UV Maps*
 - Remove Materials*
+- Remove Unused Materials*
 
 ### Utilities
 - Check Mesh Shape Key Count
@@ -25,6 +27,7 @@
 - Retarget Armatures
 - Make Collections Per Meshes*
 - Batch Convert Texture Interpolations to Cubic* *(Blender 4.5 and higher only!)*
+- Apply All Modifiers (with option to whether apply or not apply Armature modifiers)
 
 ### Adders
 - Add Vertex Colors*
